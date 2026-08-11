@@ -1,0 +1,5 @@
+node_modules/
+harness/pk.txt
+harness/tester-keystore.json
+harness/package.json
+*.log
