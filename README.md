@@ -2,7 +2,7 @@
 
 A reusable [GenLayer](https://genlayer.com) Intelligent Contract primitive for decentralized fact-finding. It collects free-text "testimony" about a single real-world event from multiple, independent submitters; optionally corroborates each testimony against a public web source and/or an uploaded photo; and asks GenLayer validators to converge on **one** accepted narrative using an LLM equivalence check that is weighted by each submitter's on-chain reputation, not a flat majority vote.
 
-Live on GenLayer Studio Network (chain id `61999`): [`0x695fC1D13c57ccB5E2c0D7b6C2111a823917430E`](https://genlayer-explorer.vercel.app/address/0x695fC1D13c57ccB5E2c0D7b6C2111a823917430E)
+Live on GenLayer Studio Network (chain id `61999`): [`0xB801B1BC9797dbE65F35DCD07b2b6df302707fC9`](https://genlayer-explorer.vercel.app/address/0xB801B1BC9797dbE65F35DCD07b2b6df302707fC9)
 
 ## Why this is a primitive, not a demo
 
@@ -13,7 +13,7 @@ Ordinary "AI decides X" contracts either:
 
 This contract instead:
 
-- Uses `gl.eq_principle.prompt_comparative` with a deliberately loose principle, so validators only have to agree on *substance* (which testimony ids were accepted, the gist of the narrative) rather than exact wording or scores. That is what keeps consensus out of `UNDETERMINED` territory while still requiring real agreement on the outcome that pays out.
+- Uses `gl.eq_principle.prompt_comparative` to bind the exact canonical settlement bucket for every testimony. Validators may phrase the narrative differently, but they must agree on every value that can affect acceptance, the winning testimony, reward shares, reputation, or bond forfeiture.
 - Feeds each submitter's historical accuracy (`reputation_score`, a 0–10000 bps figure carried in contract storage **across events**) into the *same* nondet prompt that does the semantic clustering — reputation is load-bearing inside consensus, not a cosmetic score computed after the fact.
 - Pulls in outside evidence: an optional public source URL (`gl.nondet.web.render`) and an optional uploaded photo (fetched then interpreted via `gl.nondet.exec_prompt(images=...)`, i.e. real vision), folding both into the same consensus prompt as independent corroborating signal.
 
@@ -51,9 +51,9 @@ GenVM contract code has no trusted wall-clock primitive available to Python. Rat
 
 ### Consensus strictness
 
-`finalize_event` gathers all of an event's testimonies, then inside a single nondet closure: fetches each testimony's optional web evidence (`gl.nondet.web.render`, text mode) and optional image evidence (`gl.nondet.web.get` for bytes, then `gl.nondet.exec_prompt(images=[...])` for a factual vision description) — a fetch failure degrades to "could not be retrieved" rather than raising, so a flaky URL never blocks consensus. It then asks the model to cluster testimonies into competing narratives, weigh them by *both* semantic/factual consistency and submitter reputation, and return a strict-JSON verdict (accepted narrative, rationale, per-testimony consistency scores 0–10000 bps).
+`finalize_event` gathers all of an event's testimonies, then inside a single nondet closure: fetches each testimony's optional web evidence (`gl.nondet.web.render`, text mode) and optional image evidence (`gl.nondet.web.get` for bytes, then `gl.nondet.exec_prompt(images=[...])` for a factual vision description) — a fetch failure degrades to "could not be retrieved" rather than raising, so a flaky URL never blocks consensus. It then asks the model to cluster testimonies into competing narratives, weigh them by *both* semantic/factual consistency and submitter reputation, and return a strict-JSON verdict (accepted narrative, rationale, and one canonical per-testimony settlement score).
 
-That result is wrapped in `gl.eq_principle.prompt_comparative` with a principle that only requires the accept/reject boundary (consistency ≥ 4000 bps) to match between validators, and free-text fields to describe the same underlying account — not match byte-for-byte. This is what has kept every finalize call in testing at a clean `SUCCESS` / `FINALIZED`, never `UNDETERMINED`.
+Settlement scores are constrained to the exact buckets `0`, `2000`, `4000`, `6000`, `8000`, and `10000` bps. The validator principle requires the same bucket for each testimony in every output. The contract uses that agreed canonical value directly for acceptance (≥4000), winner selection, reward weighting, reputation deltas, and the <2000 bond-forfeiture rule; it rejects noncanonical output rather than clamping it. Free-text narrative fields may still differ semantically because they do not drive settlement.
 
 ## Methods
 
@@ -81,12 +81,13 @@ These were found empirically, on-chain, via a bisected minimal reproduction — 
 5. `TreeMap` reads use an explicit `if key in tree_map: tree_map[key] else default` helper rather than assuming a Python-dict-style `.get(key, default)` is supported.
 6. The correct EVM-interface decorator for emitting a native GEN transfer is `gl.evm.contract_interface` (not `gl.contract.interface`).
 
-## Testing
+## Live verification
 
-Tested end-to-end against the live deployment on GenLayer Studio Network using `genlayer-js` (for value-carrying payable calls) and the `genlayer` CLI (for non-payable calls), across real accounts and real GEN.
+The deployed contract was exercised end-to-end on GenLayer Studio Network with real GEN-funded events. Each successful write was required to return `ACCEPTED`, `MAJORITY_AGREE`, and GenVM `SUCCESS`; no successful-path test produced an `UNDETERMINED` consensus or a GenVM error.
 
-**Positive paths:** event creation with real GEN escrow (×4, varying reward/bond/timing parameters); testimony submission from three independent accounts against one event, including one submission corroborated by a real fetched web page and one corroborated by a real fetched-and-vision-interpreted photo; `heartbeat`-driven epoch advancement; full `finalize_event` consensus — the model correctly favored a disinterested, confident witness over one that self-reported uncertainty and one with a direct financial interest in the outcome, paid the full reward to the accepted testimony's submitter, and moved reputations up/down proportionally to consistency; `cancel_event` on a pre-testimony event with a confirmed on-chain refund; `claim_timeout_refund` triggered by a completely unrelated third-party account on a stalled event, with confirmed refunds to both the creator and all bonded submitters; `flag_dispute` on a resolved event.
+- **Settlement:** a 1,000,000,000,000-wei reward event received two detailed, mutually corroborating testimonies. Both settled at the canonical `10000` bps bucket, were accepted, and the reward ledger was fully paid and zeroed.
+- **Evidence retrieval and vision:** a second settlement used GitHub Explore's Python topic page as `evidence_url` and the direct PNG at `raw.githubusercontent.com/github/explore/main/topics/python/python.png` as `image_url`. Validator output confirmed both rendered web corroboration and a factual image interpretation of the Python logo before settling both testimonies at `10000` bps.
+- **Lifecycle recovery:** a funded pre-testimony event was cancelled and refunded; a separate funded unresolved event was advanced past its timeout and recovered with `claim_timeout_refund`.
+- **Registry and views:** disputes were recorded against a resolved event, and every public view was read successfully: `contract_info`, `get_current_epoch`, `get_reputation`, `get_event`, `get_testimony`, `list_event_testimonies`, `list_event_disputes`, and `get_dispute`.
 
-**Negative/validation paths, all correctly rejected with a clean `UserError` and no state corruption:** wrong bond amount attached, testimony text below the minimum length, unknown event id, finalizing before the unlock epoch, finalizing an already-resolved event twice, cancelling an already-cancelled event, cancelling as a non-creator, claiming a timeout refund twice, disputing a non-resolved event, finalizing with fewer than the minimum testimony count, and submitting testimony to an already-resolved event.
-
-Every write across this test pass reached `ACCEPTED`/`FINALIZED` network consensus with no `UNDETERMINED` results.
+The harness is configured for this deployment and uses `genlayer-js` for payable and non-payable write/read calls.

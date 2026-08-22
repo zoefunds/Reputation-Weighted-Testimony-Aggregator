@@ -1,4 +1,4 @@
-# v0.2.16
+# v0.2.17
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 import json
@@ -20,6 +20,12 @@ REPUTATION_STEP_DOWN = u256(600)       # lost per rejected/low-consistency testi
 ACCEPTANCE_THRESHOLD_BPS = u256(4000)  # consistency score needed to be "accepted"
 BOND_FORFEIT_THRESHOLD_BPS = u256(2000)  # below this, bond is forfeited to pool
 MIN_TESTIMONIES_TO_FINALIZE = 2
+
+# A validator must choose one of these *canonical settlement values*.  The
+# selected value drives every post-consensus calculation (acceptance,
+# winner selection, reward weight, reputation delta, and bond treatment), so
+# no unverified model precision can influence an economic outcome.
+SETTLEMENT_SCORE_BUCKETS = (0, 2000, 4000, 6000, 8000, 10000)
 MIN_FINALIZE_EPOCHS = 1                # creator must allow >= 1 epoch for submissions
 DEFAULT_TIMEOUT_GRACE_EPOCHS = 10      # epochs past unlock before anyone can force-refund
 
@@ -53,14 +59,6 @@ def _send_gen(to_address: Address, amount: u256) -> None:
     if amount <= u256(0):
         raise gl.vm.UserError("Transfer amount must be positive")
     _Recipient(to_address).emit_transfer(value=amount)
-
-
-def _clamp_bps(value: int) -> u256:
-    if value < 0:
-        return u256(0)
-    if value > int(MAX_REPUTATION_BPS):
-        return MAX_REPUTATION_BPS
-    return u256(value)
 
 
 def _tm_get(tree_map, key, default):
@@ -494,10 +492,12 @@ class ReputationTestimonyAggregator(gl.Contract):
                 "should be able to outweigh a larger but low-reputation, "
                 "poorly-corroborated cluster. Do not simply pick the largest "
                 "cluster by raw count.\n"
-                "3. For EVERY testimony_id, output a consistency_bps integer "
-                "0-10000 measuring how well that specific testimony matches "
-                "the narrative you selected as most credible (10000 = fully "
-                "consistent, 0 = directly contradicts it).\n"
+                "3. For EVERY testimony_id, output a settlement_bps integer "
+                "chosen ONLY from [0, 2000, 4000, 6000, 8000, 10000]. This "
+                "is the canonical settlement bucket measuring how well that "
+                "specific testimony matches the narrative you selected (10000 "
+                "= fully consistent, 0 = directly contradicts it). Do not "
+                "output intermediate values.\n"
                 "4. Write a neutral 2-4 sentence accepted_narrative summarizing "
                 "what most likely happened, and a short rationale explaining "
                 "why this narrative was chosen over the alternatives "
@@ -510,7 +510,7 @@ class ReputationTestimonyAggregator(gl.Contract):
                 "{\n"
                 '  "accepted_narrative": "string",\n'
                 '  "rationale": "string",\n'
-                '  "scores": [{"testimony_id": "string", "consistency_bps": 0}]\n'
+                '  "scores": [{"testimony_id": "string", "settlement_bps": 0}]\n'
                 "}"
             )
 
@@ -521,10 +521,12 @@ class ReputationTestimonyAggregator(gl.Contract):
             _resolve_testimony,
             principle=(
                 "The JSON must contain the same set of testimony_id keys in "
-                "'scores' as the input. For each testimony_id, whether "
-                "consistency_bps is >= 4000 or < 4000 must match between "
-                "outputs (i.e. the accept/reject boundary must agree), but the "
-                "exact numeric value may differ by up to 1000. "
+                "'scores' as the input. For each testimony_id, its "
+                "settlement_bps value must be the exact same canonical integer "
+                "in both outputs and must be one of 0, 2000, 4000, 6000, 8000, "
+                "or 10000. These values determine acceptance, the winning "
+                "testimony, reward shares, reputation updates, and bond "
+                "forfeiture, so no numeric difference is permitted. "
                 "'accepted_narrative' and 'rationale' may be phrased "
                 "differently as long as they describe the same underlying "
                 "account of the event."
@@ -540,7 +542,13 @@ class ReputationTestimonyAggregator(gl.Contract):
         for row in scores:
             try:
                 tid = str(row["testimony_id"])
-                bps = _clamp_bps(int(row["consistency_bps"]))
+                # Reject noncanonical values instead of clamping them.  A
+                # clamped value could otherwise differ from what validators
+                # compared and would reintroduce an unbound settlement input.
+                raw_bps = int(row["settlement_bps"])
+                if raw_bps not in SETTLEMENT_SCORE_BUCKETS:
+                    continue
+                bps = u256(raw_bps)
                 score_by_id[tid] = bps
             except (KeyError, TypeError, ValueError):
                 continue

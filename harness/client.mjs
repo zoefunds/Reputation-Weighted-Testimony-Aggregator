@@ -3,7 +3,7 @@ import { createClient, createAccount } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
 const PK = fs.readFileSync(new URL("./pk.txt", import.meta.url), "utf8").trim();
-const CONTRACT = "0x695fC1D13c57ccB5E2c0D7b6C2111a823917430E";
+const CONTRACT = "0xB801B1BC9797dbE65F35DCD07b2b6df302707fC9";
 
 export const account = createAccount(PK);
 export const client = createClient({ chain: studionet, account });
